@@ -1,0 +1,14 @@
+{
+  "grad_satisfaction": 73.47,
+  "nongrad_satisfaction": 48.98,
+  "overall_satisfaction": 51.62,
+  "level8_satisfaction": 80.53,
+  "classroom_utilization": 26.3,
+  "avg_idle_gap": 2.6704,
+  "time_conflicts": 0,
+  "total_allocations": 15079,
+  "total_waitlisted": 14131,
+  "total_requests": 29210,
+  "conflict_classifier_accuracy": 0.947,
+  "improvement_vs_fifo_graduating_pp": 15.5
+}

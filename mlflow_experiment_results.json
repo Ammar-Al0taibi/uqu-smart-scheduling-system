@@ -1,0 +1,33 @@
+{
+  "experiment": "UQU_V2_Classifier",
+  "best_model": "GradientBoosting",
+  "best_accuracy": 0.827742023825825,
+  "models": {
+    "RandomForest": {
+      "accuracy": 0.8249,
+      "auc_roc": 0.9201,
+      "cv_acc": 0.8192,
+      "time_s": 11.32
+    },
+    "GradientBoosting": {
+      "accuracy": 0.8277,
+      "auc_roc": 0.9206,
+      "cv_acc": 0.8196,
+      "time_s": 21.38
+    },
+    "LogisticRegression": {
+      "accuracy": 0.8128,
+      "auc_roc": 0.8891,
+      "cv_acc": 0.7989,
+      "time_s": 0.25
+    }
+  },
+  "n_features_v1": 8,
+  "n_features_v2": 12,
+  "new_features": [
+    "credit_hours_completed",
+    "failed_courses_count",
+    "priority_x_level",
+    "gpa_x_priority"
+  ]
+}

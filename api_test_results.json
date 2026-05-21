@@ -1,0 +1,25 @@
+{
+  "api_version": "2.0.0",
+  "total_endpoints": 10,
+  "all_passing": true,
+  "sample_responses": {
+    "stats": {
+      "students": 5000,
+      "courses": 76,
+      "sections": 390
+    },
+    "kpis": {
+      "grad_sat": 20.66,
+      "time_conflicts": 0
+    },
+    "allocation_summary": {
+      "total": 29210,
+      "sat_pct": 18.7
+    },
+    "classroom_utilization": 26.3,
+    "conflict_risk_sample": {
+      "score": 1.0,
+      "outcome": "WAITLISTED"
+    }
+  }
+}

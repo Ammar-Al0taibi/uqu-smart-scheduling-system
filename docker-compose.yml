@@ -1,0 +1,168 @@
+# docker-compose.yml
+# UQU Smart Scheduling V2 — Full Stack Deployment
+# Run: docker-compose up -d
+# Access API: http://localhost:8000/docs
+# Access Dashboard: http://localhost:3000
+# Access MLflow: http://localhost:5000
+# Access Monitoring: http://localhost:9090
+
+version: "3.9"
+
+services:
+
+  # ── PostgreSQL Database ──────────────────────────────────────────────────
+  postgres:
+    image: postgres:15-alpine
+    container_name: uqu_postgres
+    environment:
+      POSTGRES_DB:       uqu_scheduling
+      POSTGRES_USER:     uqu_admin
+      POSTGRES_PASSWORD: uqu_secure_pass_2026
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U uqu_admin -d uqu_scheduling"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ── Redis Cache ────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: uqu_redis
+    ports:
+      - "6379:6379"
+    command: redis-server --maxmemory 512mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  # ── FastAPI Backend ────────────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    container_name: uqu_api
+    environment:
+      DATABASE_URL: postgresql://uqu_admin:uqu_secure_pass_2026@postgres:5432/uqu_scheduling
+      REDIS_URL:    redis://redis:6379/0
+      MLFLOW_URI:   http://mlflow:5000
+      ENV:          production
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./uqu_project/data:/app/data:ro
+      - ./uqu_project/outputs:/app/outputs
+      - ./uqu_project/figures:/app/figures
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+    command: uvicorn api.api_server:app --host 0.0.0.0 --port 8000 --workers 4
+
+  # ── Celery Worker (Background Jobs) ────────────────────────────────────────
+  celery_worker:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    container_name: uqu_celery
+    environment:
+      DATABASE_URL: postgresql://uqu_admin:uqu_secure_pass_2026@postgres:5432/uqu_scheduling
+      REDIS_URL:    redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+    depends_on:
+      - redis
+      - postgres
+    command: celery -A api.celery_tasks worker --loglevel=info --concurrency=2
+    restart: unless-stopped
+
+  # ── MLflow Tracking Server ─────────────────────────────────────────────────
+  mlflow:
+    image: python:3.11-slim
+    container_name: uqu_mlflow
+    ports:
+      - "5000:5000"
+    volumes:
+      - mlflow_data:/mlflow
+    command: >
+      bash -c "pip install mlflow psycopg2-binary -q &&
+               mlflow server
+               --host 0.0.0.0
+               --port 5000
+               --backend-store-uri postgresql://uqu_admin:uqu_secure_pass_2026@postgres:5432/mlflow
+               --default-artifact-root /mlflow/artifacts"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Prometheus Monitoring ─────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.48.0
+    container_name: uqu_prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=30d"
+    restart: unless-stopped
+
+  # ── Grafana Dashboard ─────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:10.2.0
+    container_name: uqu_grafana
+    ports:
+      - "3001:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: uqu_grafana_2026
+      GF_USERS_ALLOW_SIGN_UP:     "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana_dashboard.json:/etc/grafana/provisioning/dashboards/uqu.json
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+  # ── Nginx Reverse Proxy ───────────────────────────────────────────────────
+  nginx:
+    image: nginx:alpine
+    container_name: uqu_nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./docker/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./dashboard:/usr/share/nginx/html:ro
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+  mlflow_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  default:
+    name: uqu_network

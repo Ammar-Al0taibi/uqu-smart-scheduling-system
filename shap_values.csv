@@ -1,0 +1,13 @@
+feature,mean_shap
+section_capacity,1.9053
+courses_already_allocated,0.47284
+credit_hours_completed,0.33796
+priority_x_level,0.26534
+academic_level,0.25987
+n_preferred_sections,0.2423
+priority_weight,0.18397
+gpa_x_priority,0.17391
+slots_per_section,0.15243
+gpa,0.07687
+is_graduating,0.04291
+failed_courses_count,0.02422
