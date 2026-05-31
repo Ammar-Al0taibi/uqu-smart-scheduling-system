@@ -1,81 +1,68 @@
 """
 api_server.py
 UQU Smart Scheduling V2 — FastAPI REST API Backend
-Exposes all scheduling functions as HTTP endpoints.
-
-Endpoints:
-  GET  /health
-  GET  /api/v2/stats
-  POST /api/v2/schedule/run
-  POST /api/v2/allocate/run
-  GET  /api/v2/students/{student_id}/schedule
-  GET  /api/v2/students/{student_id}/recommendations
-  GET  /api/v2/courses/demand-forecast
-  POST /api/v2/predict/conflict-risk
-  GET  /api/v2/kpis
-  GET  /api/v2/sections
-  GET  /api/v2/classrooms/utilization
 """
 
-import os, json, time, random
-from typing import Optional, List, Dict, Any
+import os
+import json
 from datetime import datetime
+from typing import Optional
 
 import pandas as pd
-import numpy as np
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-# ── Paths ──────────────────────────────────────────────────────────────────────
-BASE     = os.path.join(os.path.dirname(__file__), "..")
-DATA_DIR = os.path.join(BASE, "..", "uqu_project", "data")
-OUT_DIR  = os.path.join(BASE, "..", "uqu_project", "outputs")
+# ── Paths ─────────────────────────────────────────────────────────
+BASE     = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.abspath(os.path.join(BASE, "..", "..", "uqu_project", "scripts", "data"))
+OUT_DIR  = os.path.abspath(os.path.join(BASE, "..", "..", "uqu_project", "scripts", "outputs"))
 
+# ── App ───────────────────────────────────────────────────────────
 app = FastAPI(
-    title="UQU Smart Scheduling API v2",
-    description="An Intelligent System for Student Schedule Management — UQU-DS-2025-M09",
+    title="UQU Smart Scheduling API",
+    description="Intelligent student schedule management system — Umm Al-Qura University",
     version="2.0.0",
-    docs_url="/docs",
-    redoc_url="/redoc",
 )
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
+    allow_origins=["http://localhost:3000", "http://localhost:5173"],
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
 
-# ── In-memory cache ────────────────────────────────────────────────────────────
-_cache: Dict[str, Any] = {}
+# ── Cache ─────────────────────────────────────────────────────────
+_cache: dict = {}
 
-def load_df(name: str) -> pd.DataFrame:
-    key = f"df_{name}"
-    if key not in _cache:
+def load_data(name: str) -> pd.DataFrame:
+    """Load a CSV file from the data directory with caching."""
+    if name not in _cache:
         path = os.path.join(DATA_DIR, f"{name}.csv")
         if not os.path.exists(path):
-            raise HTTPException(status_code=503, detail=f"Data file {name}.csv not found. Run script 01 first.")
-        _cache[key] = pd.read_csv(path)
-    return _cache[key]
+            raise HTTPException(status_code=503, detail=f"File not found: {name}.csv")
+        _cache[name] = pd.read_csv(path)
+    return _cache[name]
 
 def load_output(name: str) -> pd.DataFrame:
+    """Load a CSV file from the outputs directory with caching."""
     key = f"out_{name}"
     if key not in _cache:
         path = os.path.join(OUT_DIR, f"{name}.csv")
         if not os.path.exists(path):
-            raise HTTPException(status_code=503, detail=f"Output {name}.csv not found. Run optimizer first.")
+            raise HTTPException(status_code=503, detail=f"File not found: {name}.csv")
         _cache[key] = pd.read_csv(path)
     return _cache[key]
 
 def load_kpi() -> dict:
+    """Load the KPI report from a JSON file."""
     path = os.path.join(OUT_DIR, "kpi_report.json")
-    if os.path.exists(path):
-        with open(path) as f:
-            return json.load(f)
-    return {"error": "KPI report not generated yet"}
+    if not os.path.exists(path):
+        raise HTTPException(status_code=503, detail="File not found: kpi_report.json")
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
 
-# ── Pydantic models ────────────────────────────────────────────────────────────
+# ── Pydantic Models ───────────────────────────────────────────────
 class ConflictRiskRequest(BaseModel):
     student_id: str
     course_id: str
@@ -85,261 +72,214 @@ class ConflictRiskRequest(BaseModel):
     n_preferred_sections: int = 3
     is_graduating: bool = False
 
-class ScheduleRunRequest(BaseModel):
-    algorithm: str = "greedy"   # "greedy" | "nsga2"
-    population_size: int = 60
-    generations: int = 40
+# ── Helpers ───────────────────────────────────────────────────────
+LEVEL_COURSE_MAP = {
+    1: ["MATH101", "CS101", "ENGL101", "PHYS101"],
+    2: ["MATH201", "CS201", "DS201", "PHYS201"],
+    3: ["CS301", "AI301", "DB301", "NET301"],
+    4: ["CS401", "AI401", "SEC401", "PROJ401"],
+}
 
-# ── Endpoints ─────────────────────────────────────────────────────────────────
-
-@app.get("/health", tags=["System"])
-def health_check():
-    return {
-        "status": "healthy",
-        "timestamp": datetime.now().isoformat(),
-        "version": "2.0.0",
-        "project": "UQU-DS-2025-M09",
-    }
-
-
-@app.get("/api/v2/stats", tags=["System"])
-def get_stats():
-    """Return overall dataset statistics."""
-    try:
-        students   = load_df("students")
-        courses    = load_df("courses")
-        sections   = load_df("sections")
-        classrooms = load_df("classrooms")
-        reqs       = load_df("registration_requests")
-        return {
-            "students":              int(len(students)),
-            "courses":               int(len(courses)),
-            "sections":              int(len(sections)),
-            "classrooms":            int(len(classrooms)),
-            "registration_requests": int(len(reqs)),
-            "programs":              list(students["program"].unique()),
-            "academic_levels":       sorted(students["academic_level"].unique().tolist()),
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/api/v2/kpis", tags=["Analytics"])
-def get_kpis():
-    """Return all KPI metrics."""
-    kpi = load_kpi()
-    # Enrich with NSGA-II results if available
-    nsga2_path = os.path.join(OUT_DIR, "nsga2_results.json")
-    if os.path.exists(nsga2_path):
-        with open(nsga2_path) as f:
-            kpi["nsga2"] = json.load(f)
-    return kpi
-
-
-@app.get("/api/v2/students/{student_id}/schedule", tags=["Students"])
-def get_student_schedule(student_id: str):
-    """Return full weekly schedule for a student."""
-    try:
-        sched = load_output("student_schedules")
-        student_sched = sched[sched["student_id"].astype(str) == student_id]
-        if student_sched.empty:
-            # Check if student exists
-            students = load_df("students")
-            if student_id not in students["student_id"].astype(str).values:
-                raise HTTPException(status_code=404, detail=f"Student {student_id} not found")
-            return {"student_id": student_id, "schedule": [], "message": "No allocations found"}
-
-        days_order = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday"]
-        schedule_by_day = {}
-        for day in days_order:
-            day_rows = student_sched[student_sched["day"] == day]
-            if not day_rows.empty:
-                schedule_by_day[day] = day_rows[[
-                    "course_name", "section_id", "start_time", "end_time", "room_code"
-                ]].to_dict("records")
-
-        return {
-            "student_id":     student_id,
-            "total_sections": int(student_sched["section_id"].nunique()),
-            "schedule":       schedule_by_day,
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/api/v2/students/{student_id}/recommendations", tags=["Students"])
-def get_recommendations(student_id: str):
-    """Return top-5 course recommendations for a student."""
-    rec_path = os.path.join(OUT_DIR, "sample_recommendations.json")
-    if not os.path.exists(rec_path):
-        raise HTTPException(status_code=503, detail="Recommendations not generated. Run script 05.")
-    with open(rec_path) as f:
-        recs = json.load(f)
-    if student_id in recs:
-        return recs[student_id]
-    # Generate live recommendation
-    return {
-        "student_id":      student_id,
-        "message":         "Student not in pre-computed sample. Use the ML module for live inference.",
-        "recommendations": [],
-    }
-
-
-@app.get("/api/v2/courses/demand-forecast", tags=["Analytics"])
-def get_demand_forecast(top_n: int = Query(20, ge=1, le=76)):
-    """Return demand forecast for all courses."""
-    try:
-        forecast = load_output("course_demand_forecast")
-        top = forecast.sort_values("forecast_2_sem", ascending=False).head(top_n)
-        return {
-            "total_courses":  int(len(forecast)),
-            "top_n":          top_n,
-            "forecasts":      top[[
-                "course_code", "course_name", "level",
-                "current_requests", "forecast_next_sem", "forecast_2_sem",
-                "recommended_sections", "growth_rate_pct"
-            ]].to_dict("records"),
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/api/v2/predict/conflict-risk", tags=["ML"])
-def predict_conflict_risk(req: ConflictRiskRequest):
+def get_recommended_courses(student_id: str, level: int, gpa: float) -> dict:
     """
-    Predict the probability that a registration request will be waitlisted.
-    Uses a rule-based approximation (Random Forest model weights embedded).
+    Simple course recommendation logic based on academic level and GPA.
+    Can be replaced later with a real ML model.
     """
-    # Rule-based approximation of the trained RF
-    risk_score = 0.0
-    risk_score += (5.0 - req.priority_weight) * 0.15   # lower priority = higher risk
-    risk_score += (8  - req.academic_level)  * 0.08
-    risk_score += (4.0 - req.gpa)            * 0.05
-    risk_score += (3  - req.n_preferred_sections) * 0.03
-    risk_score -= 0.20 if req.is_graduating else 0.0
-    risk_score = max(0.0, min(1.0, risk_score))
+    suitable    = []
+    recommended = []
 
-    level = "HIGH" if risk_score > 0.6 else "MEDIUM" if risk_score > 0.35 else "LOW"
+    level_courses = LEVEL_COURSE_MAP.get(level, [])
+    next_level    = LEVEL_COURSE_MAP.get(level + 1, [])
+
+    # Current level courses — always suitable
+    for course in level_courses:
+        suitable.append({
+            "course_id": course,
+            "reason":    f"Course suitable for your academic level ({level})",
+            "priority":  "high"
+        })
+
+    # If GPA is high, recommend a course from the next level
+    if gpa >= 3.5 and next_level:
+        recommended.append({
+            "course_id": next_level[0],
+            "reason":    f"Your GPA of {gpa:.2f} qualifies you for an advanced course",
+            "priority":  "medium"
+        })
+
+    # If GPA is low, recommend a support course
+    if gpa < 2.5 and level_courses:
+        recommended.append({
+            "course_id": level_courses[0],
+            "reason":    "We recommend focusing on this course to improve your GPA",
+            "priority":  "high"
+        })
+
     return {
-        "student_id":         req.student_id,
-        "course_id":          req.course_id,
-        "conflict_risk_score":round(risk_score, 4),
-        "risk_level":         level,
-        "predicted_outcome":  "WAITLISTED" if risk_score > 0.5 else "ALLOCATED",
-        "top_factors": [
-            f"Priority weight {req.priority_weight} (weight: 0.15)",
-            f"Academic level {req.academic_level} (weight: 0.08)",
-            f"GPA {req.gpa} (weight: 0.05)",
-        ],
+        "student_id":          student_id,
+        "academic_level":      level,
+        "gpa":                 gpa,
+        "suitable_courses":    suitable,
+        "recommended_courses": recommended,
+        "total_suggestions":   len(suitable) + len(recommended),
+        "generated_at":        datetime.now().isoformat(),
+    }
+
+# ════════════════════════════════════════════════════════════════
+#  Endpoints
+# ════════════════════════════════════════════════════════════════
+
+# ── Health ───────────────────────────────────────────────────────
+@app.get("/health", tags=["General"], summary="Server health check")
+def health():
+    """Confirms the server is running."""
+    return {"status": "ok", "time": datetime.now().isoformat()}
+
+
+# ── Stats ─────────────────────────────────────────────────────────
+@app.get("/api/v2/stats", tags=["General"], summary="System statistics")
+def stats():
+    """Number of students, courses, sections, and more."""
+    students   = load_data("students")
+    courses    = load_data("courses")
+    sections   = load_data("sections")
+    classrooms = load_data("classrooms")
+    requests   = load_data("registration_requests")
+
+    return {
+        "students":   int(len(students)),
+        "courses":    int(len(courses)),
+        "sections":   int(len(sections)),
+        "classrooms": int(len(classrooms)),
+        "requests":   int(len(requests)),
+        "programs":   list(students["program"].unique()),
     }
 
 
-@app.get("/api/v2/sections", tags=["Schedule"])
-def get_sections(
-    gender: Optional[str] = None,
-    course_code: Optional[str] = None,
-    building: Optional[str] = None,
+# ── KPIs ──────────────────────────────────────────────────────────
+@app.get("/api/v2/kpis", tags=["General"], summary="Key Performance Indicators")
+def kpis():
+    """Main KPI report for the system."""
+    return load_kpi()
+
+
+# ── Students ──────────────────────────────────────────────────────
+@app.get("/api/v2/students/{student_id}/schedule", tags=["Students"], summary="Student schedule")
+def student_schedule(student_id: str):
+    """
+    Schedule for a specific student.
+
+    - **student_id**: Student ID number
+    """
+    df     = load_output("student_schedules")
+    result = df[df["student_id"].astype(str) == student_id]
+
+    if result.empty:
+        return {"student_id": student_id, "schedule": [], "message": "No schedule found for this student"}
+
+    return {"student_id": student_id, "schedule": result.to_dict("records")}
+
+
+@app.get("/api/v2/students/{student_id}/recommendations", tags=["Students"], summary="Smart recommendations for student")
+def student_recommendations(
+    student_id: str,
+    academic_level: int = Query(..., ge=1, le=8, description="Academic level (1-8)"),
+    gpa: float          = Query(..., ge=0.0, le=4.0, description="Cumulative GPA (0.0 - 4.0)"),
 ):
-    """Return scheduled sections with optional filters."""
-    try:
-        schedule = load_output("section_schedule")
-        if gender:
-            schedule = schedule[schedule["gender_section"] == gender]
-        if course_code:
-            schedule = schedule[schedule["course_code"].str.upper() == course_code.upper()]
-        if building:
-            schedule = schedule[schedule["building"] == building]
-        return {
-            "count":    int(len(schedule)),
-            "sections": schedule[[
-                "section_id", "course_code", "section_number",
-                "instructor_id", "room_code", "building",
-                "days", "start_times", "capacity", "gender_section"
-            ]].to_dict("records"),
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    """
+    Smart recommendations for a student based on their level and GPA.
+
+    - **student_id**: Student ID number
+    - **academic_level**: Academic level from 1 to 8
+    - **gpa**: Cumulative GPA from 0.0 to 4.0
+
+    Returns:
+    - **suitable_courses**: Courses appropriate for the current level
+    - **recommended_courses**: Courses recommended based on GPA
+    """
+    return get_recommended_courses(student_id, academic_level, gpa)
 
 
-@app.get("/api/v2/classrooms/utilization", tags=["Analytics"])
-def get_classroom_utilization():
-    """Return classroom utilization breakdown by building."""
-    try:
-        schedule   = load_output("section_schedule")
-        classrooms = load_df("classrooms")
-        slots      = load_df("time_slots")
-
-        total_slots = len(slots)
-        cr_building = dict(zip(classrooms["classroom_id"], classrooms["building"]))
-        schedule["building"] = schedule["classroom_id"].map(cr_building)
-
-        by_building = []
-        for bld, grp in schedule.groupby("building"):
-            used = sum(len(str(s).split("|")) for s in grp["slot_ids"])
-            n_rooms = len(classrooms[classrooms["building"] == bld])
-            max_slots = n_rooms * total_slots
-            util_pct = round(used / max_slots * 100, 1) if max_slots > 0 else 0
-            by_building.append({
-                "building":         bld,
-                "rooms":            n_rooms,
-                "slots_used":       used,
-                "max_slots":        max_slots,
-                "utilization_pct":  util_pct,
-            })
-
-        by_building.sort(key=lambda x: -x["utilization_pct"])
-        return {
-            "by_building":         by_building,
-            "overall_utilization": round(
-                sum(b["slots_used"] for b in by_building) /
-                max(sum(b["max_slots"] for b in by_building), 1) * 100, 1),
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+# ── Courses ───────────────────────────────────────────────────────
+@app.get("/api/v2/courses/demand-forecast", tags=["Courses"], summary="Course demand forecast")
+def demand_forecast(top_n: int = Query(10, ge=1, le=50, description="Number of courses to display")):
+    """Most in-demand courses with enrollment forecasts."""
+    df = load_output("course_demand_forecast")
+    return df.head(top_n).to_dict("records")
 
 
-@app.get("/api/v2/allocations/summary", tags=["Schedule"])
-def get_allocation_summary():
-    """Return allocation statistics broken down by level and program."""
-    try:
-        alloc    = load_output("allocations")
-        students = load_df("students")
-        reqs     = load_df("registration_requests")
+# ── Sections ──────────────────────────────────────────────────────
+@app.get("/api/v2/sections", tags=["Sections"], summary="Section schedule")
+def sections(
+    page: int      = Query(1, ge=1, description="Page number"),
+    page_size: int = Query(50, ge=1, le=200, description="Results per page"),
+):
+    """
+    List of course sections with pagination support.
 
-        student_info = students.set_index(students["student_id"].astype(str))
-        alloc["student_id"] = alloc["student_id"].astype(str)
+    - **page**: Page number
+    - **page_size**: Number of results per page (max 200)
+    """
+    df    = load_output("section_schedule")
+    total = len(df)
+    start = (page - 1) * page_size
+    end   = start + page_size
 
-        alloc["level"] = alloc["student_id"].map(
-            dict(zip(student_info.index, student_info["academic_level"])))
-        alloc["program"] = alloc["student_id"].map(
-            dict(zip(student_info.index, student_info["program"])))
-
-        by_level = alloc.groupby("level").size().reset_index(name="allocated")
-        total_by_level = reqs.copy()
-        total_by_level["level"] = total_by_level["student_id"].astype(str).map(
-            dict(zip(student_info.index, student_info["academic_level"])))
-        total_by_level = total_by_level.groupby("level").size().reset_index(name="total")
-
-        merged = by_level.merge(total_by_level, on="level")
-        merged["satisfaction_pct"] = (merged["allocated"] / merged["total"] * 100).round(1)
-
-        return {
-            "total_requests":   int(len(reqs)),
-            "total_allocated":  int(len(alloc)),
-            "total_waitlisted": int(len(reqs) - len(alloc)),
-            "overall_sat_pct":  round(len(alloc) / len(reqs) * 100, 1),
-            "by_level":         merged.to_dict("records"),
-            "by_program":       alloc.groupby("program").size().reset_index(name="count").to_dict("records"),
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return {
+        "total":     total,
+        "page":      page,
+        "page_size": page_size,
+        "pages":     (total + page_size - 1) // page_size,
+        "data":      df.iloc[start:end].to_dict("records"),
+    }
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
+# ── Classrooms ────────────────────────────────────────────────────
+@app.get("/api/v2/classrooms/utilization", tags=["Classrooms"], summary="Classroom utilization rate")
+def classrooms_utilization():
+    """Summary of classroom utilization."""
+    df    = load_output("section_schedule")
+    total = len(df)
+
+    return {
+        "total_sections": total,
+        "message":        "Detailed data coming in the next update",
+    }
+
+
+# ── Allocations ───────────────────────────────────────────────────
+@app.get("/api/v2/allocations/summary", tags=["Allocations"], summary="Allocation summary")
+def allocations_summary():
+    """Summary of student-to-section allocations."""
+    df = load_output("allocations")
+    return {
+        "total_allocated": int(len(df)),
+        "message":         "Detailed data coming in the next update",
+    }
+
+
+# ── Conflict Risk Prediction ───────────────────────────────────────
+@app.post("/api/v2/predict/conflict-risk", tags=["Prediction"], summary="Schedule conflict probability")
+def conflict_risk(req: ConflictRiskRequest):
+    """
+    Estimates the probability of a scheduling conflict for a student registering in a specific course.
+
+    Note: Calculation is currently approximate. Will be replaced by an ML model in a future release.
+    """
+    score = round((5 - req.priority_weight) * 0.2, 3)
+
+    return {
+        "student_id": req.student_id,
+        "course_id":  req.course_id,
+        "risk_score": score,
+        "risk_level": "high" if score > 0.7 else "medium" if score > 0.4 else "low",
+        "note":       "Approximate calculation — ML model under development",
+    }
+
+
+# ── Run Server ────────────────────────────────────────────────────
 if __name__ == "__main__":
     import uvicorn
-    print("Starting UQU Smart Scheduling API v2...")
-    print("Docs: http://localhost:8000/docs")
-    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
+    print("\nStarting server at http://127.0.0.1:8000")
+    print("Interactive docs: http://127.0.0.1:8000/docs\n")
+    uvicorn.run(app, host="127.0.0.1", port=8000, log_level="info")
